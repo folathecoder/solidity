@@ -27,14 +27,7 @@ using namespace solidity::langutil;
 
 void ImmutableValidator::analyze()
 {
-	m_inConstructionContext = true;
-
 	auto linearizedContracts = m_currentContract.annotation().linearizedBaseContracts | ranges::views::reverse;
-
-	for (ContractDefinition const* contract: linearizedContracts)
-		for (VariableDeclaration const* stateVar: contract->stateVariables())
-			if (stateVar->value())
-				m_initializedStateVariables.emplace(stateVar);
 
 	for (ContractDefinition const* contract: linearizedContracts)
 		for (VariableDeclaration const* stateVar: contract->stateVariables())
@@ -42,15 +35,19 @@ void ImmutableValidator::analyze()
 				stateVar->value()->accept(*this);
 
 	for (ContractDefinition const* contract: linearizedContracts)
-		if (contract->constructor())
-			visitCallableIfNew(*contract->constructor());
-
-	for (ContractDefinition const* contract: linearizedContracts)
 		for (std::shared_ptr<InheritanceSpecifier> const& inheritSpec: contract->baseContracts())
 			if (auto args = inheritSpec->arguments())
 				ASTNode::listAccept(*args, *this);
 
-	m_inConstructionContext = false;
+	for (ContractDefinition const* contract: linearizedContracts)
+	{
+		for (VariableDeclaration const* stateVar: contract->stateVariables())
+			if (stateVar->value())
+				m_initializedStateVariables.emplace(stateVar);
+
+		if (contract->constructor())
+			visitCallableIfNew(*contract->constructor());
+	}
 
 	for (ContractDefinition const* contract: linearizedContracts)
 	{
@@ -63,6 +60,15 @@ void ImmutableValidator::analyze()
 
 	checkAllVariablesInitialized(m_currentContract.location());
 }
+
+bool ImmutableValidator::visit(Assignment const& _assignment)
+{
+	// Need to visit values first (rhs) as they might access other immutables.
+	_assignment.rightHandSide().accept(*this);
+	_assignment.leftHandSide().accept(*this);
+	return false;
+}
+
 
 bool ImmutableValidator::visit(FunctionDefinition const& _functionDefinition)
 {
@@ -177,6 +183,11 @@ void ImmutableValidator::analyseVariableReference(VariableDeclaration const& _va
 	if (!_variableReference.isStateVariable() || !_variableReference.immutable())
 		return;
 
+	auto secondaryLocation = SecondarySourceLocation().append(
+		"While constructing contract '" + m_currentContract.name() + "'",
+		m_currentContract.location()
+	);
+
 	// If this is not an ordinary assignment, we write and read at the same time.
 	bool write = _expression.annotation().willBeWrittenTo;
 	bool read = !_expression.annotation().willBeWrittenTo || !_expression.annotation().lValueOfOrdinaryAssignment;
@@ -186,40 +197,65 @@ void ImmutableValidator::analyseVariableReference(VariableDeclaration const& _va
 			m_errorReporter.typeError(
 				1581_error,
 				_expression.location(),
+				secondaryLocation,
 				"Cannot write to immutable here: Immutable variables can only be initialized inline or assigned directly in the constructor."
 			);
 		else if (m_currentConstructor->annotation().contract->id() != _variableReference.annotation().contract->id())
 			m_errorReporter.typeError(
 				7484_error,
 				_expression.location(),
+				secondaryLocation,
 				"Cannot write to immutable here: Immutable variables must be initialized in the constructor of the contract they are defined in."
 			);
 		else if (m_inLoop)
 			m_errorReporter.typeError(
 				6672_error,
 				_expression.location(),
+				secondaryLocation,
 				"Cannot write to immutable here: Immutable variables cannot be initialized inside a loop."
 			);
 		else if (m_inBranch)
 			m_errorReporter.typeError(
 				4599_error,
 				_expression.location(),
+				secondaryLocation,
 				"Cannot write to immutable here: Immutable variables cannot be initialized inside an if statement."
 			);
 		else if (m_initializedStateVariables.count(&_variableReference))
+		{
+			if (!read)
+				m_errorReporter.typeError(
+					1574_error,
+					_expression.location(),
+					secondaryLocation,
+					"Immutable state variable already initialized."
+				);
+			else
+				m_errorReporter.typeError(
+					2718_error,
+					_expression.location(),
+					secondaryLocation,
+					"Immutable variables cannot be modified after initalization."
+				);
+		}
+		else if (read)
 			m_errorReporter.typeError(
-				1574_error,
+				3969_error,
 				_expression.location(),
-				"Immutable state variable already initialized."
+				secondaryLocation,
+				"Immutable variables must be initialized using an assignment."
 			);
 		m_initializedStateVariables.emplace(&_variableReference);
 	}
-	if (read && m_inConstructionContext)
+	if (
+		read &&
+		!m_initializedStateVariables.count(&_variableReference)
+	)
 		m_errorReporter.typeError(
 			7733_error,
 			_expression.location(),
-			"Immutable variables cannot be read during contract creation time, which means "
-			"they cannot be read in the constructor or any function or modifier called from it."
+			secondaryLocation,
+			"Immutable variables cannot be read before they are initialized."
 		);
 }
 

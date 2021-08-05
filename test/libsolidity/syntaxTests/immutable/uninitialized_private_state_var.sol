@@ -17,5 +17,7 @@ contract C is B {
 
 }
 // ----
+// TypeError 7733: (196-197): Immutable variables cannot be read before they are initialized.
 // TypeError 2658: (0-202): Construction control flow ends without initializing all immutable state variables.
+// TypeError 7733: (196-197): Immutable variables cannot be read before they are initialized.
 // TypeError 2658: (204-361): Construction control flow ends without initializing all immutable state variables.
